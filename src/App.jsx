@@ -1,1054 +1,562 @@
-import { useEffect, useState, useRef, useCallback } from 'react';
-import { DAYS, CATEGORY_COLORS, SOUND_OPTIONS, DEFAULT_TEMPLATES } from './data.js';
-import { rescheduleAll, requestPermissions } from './notifications.js';
+import { useState, useEffect, useRef } from 'react';
+import { TEMPLATES, CATEGORY_COLORS, SOUND_OPTIONS } from './data.js';
+import { rescheduleAll } from './notifications.js';
 import {
-  saveEvents, loadEvents,
-  saveTempEvents, loadTempEvents,
-  setOnboarded, isOnboarded,
-  saveGlobalSound, loadGlobalSound,
-  loadCustomTemplates, upsertCustomTemplate, deleteCustomTemplate,
+  loadEvents, saveEvents, loadTempEvents, saveTempEvents,
+  isOnboarded, setOnboarded, loadGlobalSound, saveGlobalSound,
+  loadAccomplishments, saveAccomplishments, clearAllData
 } from './storage.js';
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
+const DAYS = ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'];
+const DAY_SHORT = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
 
-const uid = () => `ev_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-const tmplUid = () => `tmpl_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+function uid() { return 'ev_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,6); }
+function taskId() { return 'task_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2,5); }
+function timeToMin(t) { if (!t) return 0; const [h,m] = t.split(':').map(Number); return h*60+m; }
+function minToTime(m) { const h=Math.floor(m/60)%24, mn=m%60; return `${String(h).padStart(2,'0')}:${String(mn).padStart(2,'0')}`; }
+function fmtTime(t) { if (!t) return ''; const [h,m] = t.split(':').map(Number); const ap=h>=12?'PM':'AM', h12=h%12||12; return `${h12}:${String(m).padStart(2,'0')} ${ap}`; }
+function todayStr() { return new Date().toISOString().split('T')[0]; }
+function formatDateDisplay(ds) { return new Date(ds+'T00:00:00').toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'}); }
+function getTodayDayName() { return ['Sunday','Monday','Tuesday','Wednesday','Thursday','Friday','Saturday'][new Date().getDay()]; }
 
-const timeToMin = t => { const [h, m] = t.split(':').map(Number); return h * 60 + m; };
-const minToTime = n => {
-  const h = Math.floor(n / 60) % 24;
-  const m = n % 60;
-  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}`;
-};
-const fmtTime = t => {
-  const [h, m] = t.split(':').map(Number);
-  return `${h % 12 || 12}:${String(m).padStart(2,'0')} ${h >= 12 ? 'PM' : 'AM'}`;
-};
-
-const autoColor = title =>
-  CATEGORY_COLORS[title] || CATEGORY_COLORS[Object.keys(CATEGORY_COLORS).find(k => title.toLowerCase().includes(k.toLowerCase()))] || '#818CF8';
-
-const today = () => {
-  const d = new Date().getDay();
-  return DAYS[d === 0 ? 6 : d - 1];
-};
-
-const nowMin = () => { const n = new Date(); return n.getHours() * 60 + n.getMinutes(); };
-
-// Attach fresh ids to template events
-const hydrateEvents = events =>
-  events.map(e => ({ ...e, id: uid(), isTemp: false }));
-
-// ─── Default new-event shape ──────────────────────────────────────────────────
-
-const newEventDefaults = (day = today()) => ({
-  id: '',
-  days: [day],          // multi-day array (new)
-  day,                  // kept for single-event compat
-  start: '09:00',
-  end:   '10:00',
-  title: '',
-  color: '#818CF8',
-  notify: true,
-  notifyBefore: 10,
-  sound: 'default',
-  soundEnabled: true,
-  isTemp: false,
-});
-
-// ─── Root App ─────────────────────────────────────────────────────────────────
-
+// ── App Root ──────────────────────────────────────────────────────────────────
 export default function App() {
-  const [view,          setView]         = useState('loading');
-  const [events,        setEvents]       = useState([]);
-  const [tempEvents,    setTempEvents]   = useState([]);
-  const [selectedDay,   setSelectedDay]  = useState(today());
-  const [editingEvent,  setEditingEvent] = useState(null);
-  const [globalSoundOn, setGlobalSoundOn]= useState(true);
-  const [customTemplates, setCustomTemplates] = useState([]);
+  const [view, setView] = useState('loading');
+  const [events, setEvents] = useState([]);
+  const [tempEvents, setTempEvents] = useState([]);
+  const [globalSoundOn, setGlobalSoundOn] = useState(true);
+  const [accomplishments, setAccomplishments] = useState({});
+  const [selectedDay, setSelectedDay] = useState(getTodayDayName());
+  const [editingEvent, setEditingEvent] = useState(null);
+  const [checklistEvent, setChecklistEvent] = useState(null);
 
-  // Boot: load all persisted data
   useEffect(() => {
     (async () => {
-      const [onboarded, evts, temps, snd, custTmpls] = await Promise.all([
-        isOnboarded(), loadEvents(), loadTempEvents(), loadGlobalSound(), loadCustomTemplates(),
-      ]);
-      const now = new Date();
-      const liveTempEvents = temps.filter(e => e.endDate && new Date(e.endDate) > now);
-      setEvents(evts);
-      setTempEvents(liveTempEvents);
-      setGlobalSoundOn(snd);
-      setCustomTemplates(custTmpls);
+      const onboarded = await isOnboarded();
+      const evts = await loadEvents();
+      const temps = await loadTempEvents();
+      const sound = await loadGlobalSound();
+      const acc = await loadAccomplishments();
+      setEvents(evts); setTempEvents(temps); setGlobalSoundOn(sound); setAccomplishments(acc);
       setView(onboarded ? 'timetable' : 'onboarding');
     })();
   }, []);
 
-  // Persist events whenever they change
   useEffect(() => { if (view !== 'loading') saveEvents(events); }, [events]);
   useEffect(() => { if (view !== 'loading') saveTempEvents(tempEvents); }, [tempEvents]);
+  useEffect(() => { if (view !== 'loading') saveGlobalSound(globalSoundOn); }, [globalSoundOn]);
 
-  // Reschedule notifications on any events change
   useEffect(() => {
-    if (view !== 'loading') rescheduleAll(events, tempEvents, globalSoundOn);
+    const now = new Date();
+    const active = tempEvents.filter(e => { const [h,m]=e.end.split(':').map(Number); const end=new Date(); end.setHours(h,m,0,0); return end>now; });
+    if (active.length !== tempEvents.length) setTempEvents(active);
+  }, []);
+
+  useEffect(() => {
+    if (view === 'loading') return;
+    rescheduleAll(events, tempEvents, globalSoundOn);
   }, [events, tempEvents, globalSoundOn]);
 
-  // ── Handlers ────────────────────────────────────────────────────────────────
+  async function handleSelectTemplate(template) {
+    const seeded = template.events.map(e => ({ ...e, id: uid(), checklist: e.checklist || [] }));
+    setEvents(seeded); await setOnboarded(true); setView('timetable');
+  }
 
-  const handleSelectTemplate = async (template) => {
-    const hydrated = hydrateEvents(template.events);
-    setEvents(hydrated);
-    await setOnboarded(true);
+  function handleAddEvent(event) {
+    setEvents(prev => [...prev, { ...event, id: uid(), checklist: event.checklist || [] }]);
     setView('timetable');
-  };
+  }
 
-  const handleAddEvent = (eventData) => {
-    // eventData.days is an array — create one event per day
-    const days = eventData.days && eventData.days.length > 0 ? eventData.days : [eventData.day];
-    const newEvts = days.map(day => ({
-      ...eventData,
-      id: uid(),
-      day,
-      days: undefined,  // store only the single day per event
-      isTemp: false,
-    }));
-    setEvents(prev => [...prev, ...newEvts]);
-    setView('timetable');
-  };
+  function handleUpdateEvent(updated) {
+    setEvents(prev => prev.map(e => e.id === updated.id ? { ...updated, checklist: updated.checklist || [] } : e));
+    setView('timetable'); setEditingEvent(null);
+  }
 
-  const handleEditEvent = (eventData) => {
-    setEvents(prev => prev.map(e => e.id === eventData.id ? { ...eventData, days: undefined } : e));
-    setView('timetable');
-  };
-
-  const handleDeleteEvent = (id) => {
+  function handleDeleteEvent(id) {
     setEvents(prev => prev.filter(e => e.id !== id));
+    setAccomplishments(prev => { const next={...prev}; delete next[id]; saveAccomplishments(next); return next; });
+    setView('timetable'); setEditingEvent(null);
+  }
+
+  function handleAddTemp(event) {
+    setTempEvents(prev => [...prev, { ...event, id: uid(), isTemp: true, checklist: [] }]);
     setView('timetable');
-  };
-
-  const handleAddTemp = (eventData) => {
-    const ev = { ...eventData, id: uid(), isTemp: true };
-    setTempEvents(prev => [...prev, ev]);
-    setView('timetable');
-  };
-
-  const handleDeleteTemp = (id) => {
-    setTempEvents(prev => prev.filter(e => e.id !== id));
-  };
-
-  const handleSoundToggle = async (on) => {
-    setGlobalSoundOn(on);
-    await saveGlobalSound(on);
-  };
-
-  const handleReset = async () => {
-    const { clearAllData } = await import('./storage.js');
-    await clearAllData();
-    setEvents([]);
-    setTempEvents([]);
-    setView('onboarding');
-  };
-
-  // ── Template management ──────────────────────────────────────────────────────
-
-  const handleSaveTemplate = async ({ id, name, description, icon, color }) => {
-    const template = {
-      id: id || tmplUid(),
-      name,
-      description,
-      icon: icon || '📋',
-      color: color || '#818CF8',
-      isDefault: false,
-      events: events.map(({ id: _id, isTemp, ...rest }) => rest), // strip runtime ids
-    };
-    const updated = await upsertCustomTemplate(template);
-    setCustomTemplates(updated);
-    return template;
-  };
-
-  const handleDeleteCustomTemplate = async (id) => {
-    const updated = await deleteCustomTemplate(id);
-    setCustomTemplates(updated);
-  };
-
-  const handleLoadTemplate = async (template) => {
-    const hydrated = hydrateEvents(template.events);
-    setEvents(hydrated);
-  };
-
-  // ── Routing ──────────────────────────────────────────────────────────────────
-
-  const allTemplates = [...DEFAULT_TEMPLATES, ...customTemplates];
-
-  if (view === 'loading') {
-    return (
-      <div style={S.centered}>
-        <div style={S.loader} />
-      </div>
-    );
   }
 
-  if (view === 'onboarding') {
-    return <Onboarding templates={allTemplates} onSelect={handleSelectTemplate} />;
+  async function handleReset() {
+    await clearAllData(); setEvents([]); setTempEvents([]); setAccomplishments({}); setView('onboarding');
   }
 
-  if (view === 'addEvent') {
-    return (
-      <EventForm
-        initial={editingEvent || newEventDefaults(selectedDay)}
-        isEdit={false}
-        onSave={handleAddEvent}
-        onCancel={() => setView('timetable')}
-      />
-    );
+  function handleOpenChecklist(event) { setChecklistEvent(event); setView('checklist'); }
+
+  async function handleToggleTask(eventId, tid, checked) {
+    const date = todayStr();
+    setAccomplishments(prev => {
+      const next = { ...prev };
+      if (!next[eventId]) next[eventId] = {};
+      if (!next[eventId][date]) next[eventId][date] = {};
+      next[eventId][date][tid] = checked;
+      saveAccomplishments(next);
+      return next;
+    });
   }
 
-  if (view === 'editEvent' && editingEvent) {
-    return (
-      <EventForm
-        initial={{ ...editingEvent, days: [editingEvent.day] }}
-        isEdit={true}
-        onSave={handleEditEvent}
-        onDelete={handleDeleteEvent}
-        onCancel={() => setView('timetable')}
-      />
-    );
-  }
+  if (view === 'loading') return <div style={S.screen}><div style={S.loadCenter}><div style={S.spinner}/></div></div>;
+  if (view === 'onboarding') return <Onboarding onSelect={handleSelectTemplate} />;
+  if (view === 'addEvent') return <EventForm event={{day:selectedDay,start:'09:00',end:'10:00',title:'',color:'#818CF8',notify:false,notifyBefore:10,sound:'default',soundEnabled:true,checklist:[]}} onSave={handleAddEvent} onCancel={()=>setView('timetable')} />;
+  if (view === 'editEvent' && editingEvent) return <EventForm event={editingEvent} onSave={handleUpdateEvent} onCancel={()=>{setView('timetable');setEditingEvent(null);}} onDelete={()=>handleDeleteEvent(editingEvent.id)} />;
+  if (view === 'addTemp') return <TempForm onSave={handleAddTemp} onCancel={()=>setView('timetable')} currentDay={selectedDay} />;
+  if (view === 'settings') return <Settings events={events} globalSoundOn={globalSoundOn} setGlobalSoundOn={setGlobalSoundOn} onReset={handleReset} onBack={()=>setView('timetable')} />;
+  if (view === 'checklist' && checklistEvent) return <ChecklistView event={checklistEvent} accomplishments={accomplishments} onToggleTask={handleToggleTask} onViewHistory={()=>setView('checklistHistory')} onBack={()=>{setView('timetable');setChecklistEvent(null);}} />;
+  if (view === 'checklistHistory' && checklistEvent) return <HistoryView event={checklistEvent} accomplishments={accomplishments} onBack={()=>setView('checklist')} />;
 
-  if (view === 'addTemp') {
-    return (
-      <TempForm
-        onSave={handleAddTemp}
-        onCancel={() => setView('timetable')}
-        globalSoundOn={globalSoundOn}
-      />
-    );
-  }
-
-  if (view === 'settings') {
-    return (
-      <Settings
-        events={events}
-        globalSoundOn={globalSoundOn}
-        onSoundToggle={handleSoundToggle}
-        onEventUpdate={ev => setEvents(prev => prev.map(e => e.id === ev.id ? ev : e))}
-        onReset={handleReset}
-        allTemplates={allTemplates}
-        customTemplates={customTemplates}
-        onSaveTemplate={handleSaveTemplate}
-        onDeleteCustomTemplate={handleDeleteCustomTemplate}
-        onLoadTemplate={handleLoadTemplate}
-        onClose={() => setView('timetable')}
-      />
-    );
-  }
-
-  return (
-    <Timetable
-      events={events}
-      tempEvents={tempEvents}
-      selectedDay={selectedDay}
-      onDayChange={setSelectedDay}
-      onAddEvent={() => { setEditingEvent(null); setView('addEvent'); }}
-      onEditEvent={ev => { setEditingEvent(ev); setView('editEvent'); }}
-      onAddTemp={() => setView('addTemp')}
-      onDeleteTemp={handleDeleteTemp}
-      onOpenSettings={() => setView('settings')}
-    />
-  );
+  return <Timetable events={[...events,...tempEvents]} day={selectedDay} setDay={setSelectedDay} accomplishments={accomplishments} onAddEvent={()=>setView('addEvent')} onAddTemp={()=>setView('addTemp')} onEditEvent={e=>{setEditingEvent(e);setView('editEvent');}} onOpenChecklist={handleOpenChecklist} onViewSettings={()=>setView('settings')} />;
 }
 
-// ─── Onboarding ───────────────────────────────────────────────────────────────
+// ── Timetable ─────────────────────────────────────────────────────────────────
+function Timetable({ events, day, setDay, accomplishments, onAddEvent, onAddTemp, onEditEvent, onOpenChecklist, onViewSettings }) {
+  const todayName = getTodayDayName();
+  const dayEvents = events.filter(e=>e.day===day).sort((a,b)=>timeToMin(a.start)-timeToMin(b.start));
+  const now = new Date(); const nowMin = now.getHours()*60+now.getMinutes();
+  const touchStart = useRef(null);
 
-function Onboarding({ templates, onSelect }) {
-  return (
-    <div style={S.page}>
-      <div style={S.onboardHeader}>
-        <div style={S.onboardIcon}>📅</div>
-        <h1 style={S.onboardTitle}>Timetable</h1>
-        <p style={S.onboardSub}>Choose a template to get started</p>
-      </div>
-      <div style={S.tmplGrid}>
-        {templates.map(t => (
-          <button key={t.id} style={{ ...S.tmplCard, borderColor: t.color }} onClick={() => onSelect(t)}>
-            <span style={S.tmplIcon}>{t.icon}</span>
-            <span style={{ ...S.tmplDot, background: t.color }} />
-            <span style={S.tmplName}>{t.name}</span>
-            <span style={S.tmplDesc}>{t.description}</span>
-            {!t.isDefault && <span style={S.tmplCustomBadge}>Custom</span>}
-          </button>
-        ))}
-      </div>
-    </div>
-  );
-}
-
-// ─── Timetable ────────────────────────────────────────────────────────────────
-
-function Timetable({ events, tempEvents, selectedDay, onDayChange, onAddEvent, onEditEvent, onAddTemp, onDeleteTemp, onOpenSettings }) {
-  const now = nowMin();
-  const todayName = today();
-
-  const dayEvents = [
-    ...events.filter(e => e.day === selectedDay),
-    ...tempEvents.filter(e => e.day === selectedDay),
-  ].sort((a, b) => timeToMin(a.start) - timeToMin(b.start));
+  function handleTouchStart(e) { touchStart.current = {x:e.touches[0].clientX, y:e.touches[0].clientY}; }
+  function handleTouchEnd(e) {
+    if (!touchStart.current) return;
+    const dx = e.changedTouches[0].clientX - touchStart.current.x;
+    const dy = e.changedTouches[0].clientY - touchStart.current.y;
+    if (Math.abs(dx) > 50 && Math.abs(dx) > Math.abs(dy)) {
+      const idx = DAYS.indexOf(day);
+      if (dx < 0 && idx < 6) setDay(DAYS[idx+1]);
+      if (dx > 0 && idx > 0) setDay(DAYS[idx-1]);
+    }
+    touchStart.current = null;
+  }
 
   return (
-    <div style={S.page}>
-      {/* Header */}
+    <div style={S.screen}>
       <div style={S.header}>
-        <span style={S.headerTitle}>Timetable</span>
-        <button style={S.iconBtn} onClick={onOpenSettings}><Icon name="settings" /></button>
+        <div style={S.headerTitle}>Timetable</div>
+        <button style={S.iconBtn} onClick={onViewSettings}><Icon name="settings"/></button>
       </div>
-
-      {/* Day strip */}
       <div style={S.dayStrip}>
-        {DAYS.map(d => (
-          <button
-            key={d}
-            style={{ ...S.dayBtn, ...(d === selectedDay ? S.dayBtnActive : {}) }}
-            onClick={() => onDayChange(d)}
-          >
-            <span style={S.dayBtnLabel}>{d.slice(0,3)}</span>
-            {d === todayName && <span style={S.todayDot} />}
+        {DAYS.map((d,i) => (
+          <button key={d} onClick={()=>setDay(d)} style={{...S.dayBtn,...(d===day?S.dayBtnActive:{}),...(d===todayName&&d!==day?S.dayBtnToday:{})}}>
+            {DAY_SHORT[i]}
           </button>
         ))}
       </div>
-
-      {/* Event list */}
-      <div style={S.eventList}>
+      <div style={S.eventList} onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd}>
         {dayEvents.length === 0 && (
           <div style={S.emptyState}>
-            <span style={{ fontSize: 40 }}>📭</span>
-            <p style={{ marginTop: 12, color: '#94A3B8' }}>No events for {selectedDay}</p>
+            <div style={{fontSize:40}}>📅</div>
+            <div style={{fontSize:16,fontWeight:600,color:'#475569'}}>No events for {day}</div>
+            <div style={{fontSize:13,color:'#334155'}}>Tap + to add one</div>
           </div>
         )}
-        {dayEvents.map(ev => {
-          const start = timeToMin(ev.start);
-          const end   = timeToMin(ev.end);
-          const isLive = selectedDay === todayName && now >= start && now < end;
-          const isPast = selectedDay === todayName && now >= end;
+        {dayEvents.map(e => {
+          const isLive = day===todayName && nowMin>=timeToMin(e.start) && nowMin<timeToMin(e.end);
+          const isPast = day===todayName && nowMin>=timeToMin(e.end);
+          const checkCount = (e.checklist||[]).length;
+          const todayChecks = ((accomplishments[e.id]||{})[todayStr()])||{};
+          const doneCount = (e.checklist||[]).filter(t=>todayChecks[t.id]).length;
           return (
-            <button
-              key={ev.id}
-              style={{ ...S.eventCard, opacity: isPast ? 0.4 : 1, borderLeftColor: ev.color }}
-              onClick={() => !ev.isTemp && onEditEvent(ev)}
-            >
-              <div style={S.eventCardInner}>
-                <div style={S.eventLeft}>
-                  <span style={{ ...S.eventDot, background: ev.color }} />
-                  <div>
-                    <div style={S.eventTitle}>{ev.title}</div>
-                    <div style={S.eventTime}>{fmtTime(ev.start)} – {fmtTime(ev.end)}</div>
+            <div key={e.id} style={{...S.eventCard, borderLeftColor:e.color, opacity:isPast?0.5:1}}>
+              <div style={{...S.eventDot, background:e.color}}/>
+              <div style={{flex:1,minWidth:0}}>
+                <div style={{display:'flex',alignItems:'center',gap:6}}>
+                  <div style={S.eventTitle}>{e.title}{e.isTemp&&<span style={S.tempBadge}>TEMP</span>}</div>
+                  {isLive && <div style={S.liveBadge}>LIVE</div>}
+                </div>
+                <div style={S.eventTime}>{fmtTime(e.start)} – {fmtTime(e.end)}</div>
+                {checkCount > 0 && (
+                  <div style={S.checklistMini}>
+                    <span style={{color: doneCount===checkCount ? '#34D399' : '#818CF8'}}>✓</span>
+                    <span style={{color:'#64748B'}}> {doneCount}/{checkCount} tasks</span>
                   </div>
-                </div>
-                <div style={S.eventRight}>
-                  {isLive && <span style={S.liveBadge}>LIVE</span>}
-                  {ev.isTemp && (
-                    <button style={S.deleteBtn} onClick={e => { e.stopPropagation(); onDeleteTemp(ev.id); }}>
-                      <Icon name="trash" />
-                    </button>
-                  )}
-                </div>
+                )}
               </div>
-            </button>
+              <div style={{display:'flex',gap:4,flexShrink:0}}>
+                {checkCount > 0 && (
+                  <button style={{...S.iconBtn,color:'#818CF8'}} onClick={()=>onOpenChecklist(e)}><Icon name="checklist"/></button>
+                )}
+                {!e.isTemp && (
+                  <button style={S.iconBtn} onClick={()=>onEditEvent(e)}><Icon name="edit"/></button>
+                )}
+              </div>
+            </div>
           );
         })}
       </div>
-
-      {/* FABs */}
-      <div style={S.fabGroup}>
-        <button style={S.fabTemp} onClick={onAddTemp}><Icon name="lightning" /></button>
-        <button style={S.fab} onClick={onAddEvent}><Icon name="plus" /></button>
-      </div>
+      <button style={{...S.fab,...S.fabTemp}} onClick={onAddTemp}><Icon name="bolt"/></button>
+      <button style={S.fab} onClick={onAddEvent}><Icon name="plus"/></button>
     </div>
   );
 }
 
-// ─── EventForm (Add / Edit) ───────────────────────────────────────────────────
+// ── EventForm ─────────────────────────────────────────────────────────────────
+function EventForm({ event, onSave, onCancel, onDelete }) {
+  const [form, setForm] = useState({...event, checklist: event.checklist||[]});
+  const [newTask, setNewTask] = useState('');
+  function set(k,v) { setForm(f=>({...f,[k]:v})); }
 
-function EventForm({ initial, isEdit, onSave, onDelete, onCancel }) {
-  const [form, setForm] = useState(() => ({
-    ...initial,
-    days: initial.days || [initial.day || today()],
-  }));
-  const [showDelete, setShowDelete] = useState(false);
+  function addTask() {
+    const text = newTask.trim(); if (!text) return;
+    set('checklist', [...form.checklist, {id:taskId(), text}]);
+    setNewTask('');
+  }
 
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
-
-  const toggleDay = (day) => {
-    set('days', form.days.includes(day)
-      ? form.days.length > 1 ? form.days.filter(d => d !== day) : form.days // keep at least 1
-      : [...form.days, day]
-    );
-  };
-
-  const handleTitleChange = (v) => {
-    set('title', v);
-    if (!isEdit || form.color === '#818CF8') set('color', autoColor(v));
-  };
-
-  const handleSave = () => {
-    if (!form.title.trim()) return;
-    if (form.days.length === 0) return;
-    onSave({ ...form, day: form.days[0] });
-  };
-
-  const palette = Object.values(CATEGORY_COLORS);
-  const uniquePalette = [...new Set(palette)].slice(0, 20);
+  const COLORS = ['#818CF8','#34D399','#F472B6','#FB923C','#60A5FA','#A78BFA','#FBBF24','#F87171','#2DD4BF','#E879F9'];
 
   return (
-    <div style={S.page}>
-      <div style={S.formHeader}>
-        <button style={S.backBtn} onClick={onCancel}><Icon name="back" /></button>
-        <span style={S.formTitle}>{isEdit ? 'Edit Event' : 'New Event'}</span>
-        <button style={S.saveBtn} onClick={handleSave}>Save</button>
+    <div style={S.screen}>
+      <div style={S.header}>
+        <button style={S.iconBtn} onClick={onCancel}><Icon name="back"/></button>
+        <div style={S.headerTitle}>{event.id ? 'Edit Event' : 'Add Event'}</div>
+        {onDelete && <button style={{...S.iconBtn,color:'#EF4444'}} onClick={onDelete}><Icon name="trash"/></button>}
       </div>
-
       <div style={S.formBody}>
-        {/* Title */}
         <label style={S.label}>Title</label>
-        <input
-          style={S.input}
-          value={form.title}
-          onChange={e => handleTitleChange(e.target.value)}
-          placeholder="Event name"
-        />
-
-        {/* Day Selector — Multi select */}
-        <label style={S.label}>Day{!isEdit ? 's' : ''}</label>
-        {isEdit ? (
-          // When editing an existing event keep single-day for simplicity
-          <div style={S.dayPicker}>
-            {DAYS.map(d => (
-              <button
-                key={d}
-                style={{ ...S.dayPillBtn, ...(form.days.includes(d) ? S.dayPillActive : {}) }}
-                onClick={() => set('days', [d])}
-              >
-                {d.slice(0, 3)}
-              </button>
-            ))}
-          </div>
-        ) : (
-          <>
-            <div style={S.dayPicker}>
-              {DAYS.map(d => (
-                <button
-                  key={d}
-                  style={{ ...S.dayPillBtn, ...(form.days.includes(d) ? S.dayPillActive : {}) }}
-                  onClick={() => toggleDay(d)}
-                >
-                  {d.slice(0, 3)}
-                </button>
-              ))}
-            </div>
-            {/* Quick-select shortcuts */}
-            <div style={S.quickDays}>
-              {[
-                { label: 'Weekdays', days: DAYS.slice(0, 5) },
-                { label: 'Weekend',  days: DAYS.slice(5) },
-                { label: 'All',      days: DAYS },
-                { label: 'M/W/F',   days: ['Monday','Wednesday','Friday'] },
-                { label: 'T/Th',    days: ['Tuesday','Thursday'] },
-              ].map(q => (
-                <button key={q.label} style={S.quickDayBtn}
-                  onClick={() => set('days', q.days)}>
-                  {q.label}
-                </button>
-              ))}
-            </div>
-          </>
-        )}
-
-        {/* Time */}
-        <div style={S.row}>
-          <div style={{ flex: 1 }}>
-            <label style={S.label}>Start</label>
-            <input style={S.input} type="time" value={form.start}
-              onChange={e => set('start', e.target.value)} />
-          </div>
-          <div style={{ width: 16 }} />
-          <div style={{ flex: 1 }}>
-            <label style={S.label}>End</label>
-            <input style={S.input} type="time" value={form.end}
-              onChange={e => set('end', e.target.value)} />
-          </div>
+        <input style={S.input} value={form.title} onChange={e=>set('title',e.target.value)} placeholder="Event name"/>
+        <label style={S.label}>Day</label>
+        <select style={S.input} value={form.day} onChange={e=>set('day',e.target.value)}>
+          {DAYS.map(d=><option key={d}>{d}</option>)}
+        </select>
+        <div style={{display:'flex',gap:12}}>
+          <div style={{flex:1}}><label style={S.label}>Start</label><input style={S.input} type="time" value={form.start} onChange={e=>set('start',e.target.value)}/></div>
+          <div style={{flex:1}}><label style={S.label}>End</label><input style={S.input} type="time" value={form.end} onChange={e=>set('end',e.target.value)}/></div>
         </div>
-
-        {/* Color */}
         <label style={S.label}>Color</label>
-        <div style={S.colorPicker}>
-          {uniquePalette.map(c => (
-            <button key={c} style={{ ...S.colorSwatch, background: c,
-              outline: form.color === c ? `3px solid #1E293B` : 'none' }}
-              onClick={() => set('color', c)} />
+        <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:4}}>
+          {COLORS.map(c=>(
+            <button key={c} onClick={()=>set('color',c)} style={{width:30,height:30,borderRadius:'50%',background:c,border:'3px solid transparent',cursor:'pointer',...(form.color===c?{border:'3px solid #fff',boxShadow:`0 0 0 2px ${c}`}:{})}}/>
           ))}
         </div>
-
-        {/* Notifications */}
-        <div style={S.row}>
-          <span style={S.label}>Notifications</span>
-          <Toggle value={form.notify} onChange={v => set('notify', v)} />
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:16,marginBottom:4}}>
+          <label style={{...S.label,marginTop:0,marginBottom:0}}>Notifications</label>
+          <Toggle on={form.notify} onChange={v=>set('notify',v)}/>
         </div>
         {form.notify && (
-          <div style={S.row}>
-            <span style={S.label}>Remind me</span>
-            <select style={S.select} value={form.notifyBefore}
-              onChange={e => set('notifyBefore', Number(e.target.value))}>
-              {[0,5,10,15,30,60].map(n => (
-                <option key={n} value={n}>{n === 0 ? 'At event time' : `${n} min before`}</option>
-              ))}
-            </select>
-          </div>
+          <select style={S.input} value={form.notifyBefore} onChange={e=>set('notifyBefore',Number(e.target.value))}>
+            <option value={0}>At event time</option><option value={5}>5 min before</option>
+            <option value={10}>10 min before</option><option value={15}>15 min before</option>
+            <option value={30}>30 min before</option><option value={60}>1 hour before</option>
+          </select>
         )}
-
-        {/* Sound */}
-        <div style={S.row}>
-          <span style={S.label}>Sound</span>
-          <Toggle value={form.soundEnabled} onChange={v => set('soundEnabled', v)} />
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:16,marginBottom:4}}>
+          <label style={{...S.label,marginTop:0,marginBottom:0}}>Sound</label>
+          <Toggle on={form.soundEnabled} onChange={v=>set('soundEnabled',v)}/>
         </div>
         {form.soundEnabled && (
-          <div style={S.row}>
-            <span style={S.label}>Sound type</span>
-            <select style={S.select} value={form.sound}
-              onChange={e => set('sound', e.target.value)}>
-              {SOUND_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-            </select>
-          </div>
+          <select style={S.input} value={form.sound} onChange={e=>set('sound',e.target.value)}>
+            <option value="default">Default</option><option value="none">None</option>
+            <option value="beep">Beep</option><option value="chime">Chime</option>
+            <option value="alert">Alert</option><option value="gentle">Gentle</option>
+          </select>
         )}
 
-        {/* Delete (edit only) */}
-        {isEdit && (
-          showDelete ? (
-            <div style={S.deleteConfirm}>
-              <span>Delete this event?</span>
-              <div style={S.row}>
-                <button style={S.deleteConfirmBtn} onClick={() => onDelete(form.id)}>Delete</button>
-                <button style={S.cancelConfirmBtn} onClick={() => setShowDelete(false)}>Cancel</button>
-              </div>
-            </div>
-          ) : (
-            <button style={S.deleteEventBtn} onClick={() => setShowDelete(true)}>
-              Delete Event
-            </button>
-          )
-        )}
+        {/* ── Routine Checklist ── */}
+        <div style={{height:1,background:'#1E293B',margin:'20px 0 12px'}}/>
+        <div style={{fontSize:15,fontWeight:700,color:'#F1F5F9'}}>Routine Checklist</div>
+        <div style={{fontSize:12,color:'#64748B',marginTop:4,marginBottom:12}}>Tasks to complete each time this event runs</div>
+
+        {form.checklist.map((task,i)=>(
+          <div key={task.id} style={{display:'flex',alignItems:'center',background:'#1E293B',borderRadius:8,padding:'10px 12px',marginBottom:6,gap:10}}>
+            <div style={{width:20,height:20,borderRadius:'50%',background:'#334155',color:'#94A3B8',fontSize:11,fontWeight:700,display:'flex',alignItems:'center',justifyContent:'center',flexShrink:0}}>{i+1}</div>
+            <div style={{flex:1,fontSize:14,color:'#E2E8F0'}}>{task.text}</div>
+            <button onClick={()=>set('checklist',form.checklist.filter(t=>t.id!==task.id))} style={{background:'none',border:'none',color:'#475569',cursor:'pointer',fontSize:20,padding:'0 4px',lineHeight:1}}>×</button>
+          </div>
+        ))}
+
+        <div style={{display:'flex',gap:8,marginTop:8}}>
+          <input style={{...S.input,flex:1,marginBottom:0}} value={newTask} onChange={e=>setNewTask(e.target.value)} onKeyDown={e=>e.key==='Enter'&&addTask()} placeholder="Add a task..."/>
+          <button onClick={addTask} style={{background:'#818CF8',border:'none',borderRadius:10,padding:'0 16px',color:'#fff',fontSize:14,fontWeight:600,cursor:'pointer',flexShrink:0}}>Add</button>
+        </div>
+
+        <div style={{height:24}}/>
+        <button style={S.saveBtn} onClick={()=>onSave(form)}>Save Event</button>
+        <div style={{height:40}}/>
       </div>
     </div>
   );
 }
 
-// ─── TempForm ─────────────────────────────────────────────────────────────────
-
-function TempForm({ onSave, onCancel, globalSoundOn }) {
-  const [form, setForm] = useState({
-    title: '', day: today(), days: [today()],
-    start: minToTime(nowMin()), end: minToTime(nowMin() + 60),
-    color: '#F59E0B', notify: true, notifyBefore: 0,
-    sound: 'default', soundEnabled: true,
-  });
-  const set = (k, v) => setForm(f => ({ ...f, [k]: v }));
-
-  const handleSave = () => {
-    if (!form.title.trim()) return;
-    const endDate = computeEndDate(form.day, form.end);
-    const notifyAt = computeNotifyAt(form.day, form.start, form.notifyBefore);
-    onSave({ ...form, day: form.days[0], endDate: endDate.toISOString(), notifyAt: notifyAt?.toISOString() });
-  };
-
+// ── TempForm ──────────────────────────────────────────────────────────────────
+function TempForm({ onSave, onCancel, currentDay }) {
+  const [form, setForm] = useState({title:'',day:currentDay,start:'12:00',end:'13:00',color:'#FBBF24',notify:false,notifyBefore:5,sound:'default',soundEnabled:true,isTemp:true,checklist:[]});
+  function set(k,v) { setForm(f=>({...f,[k]:v})); }
   return (
-    <div style={S.page}>
-      <div style={S.formHeader}>
-        <button style={S.backBtn} onClick={onCancel}><Icon name="back" /></button>
-        <span style={S.formTitle}>Temporary Event</span>
-        <button style={S.saveBtn} onClick={handleSave}>Add</button>
+    <div style={S.screen}>
+      <div style={S.header}>
+        <button style={S.iconBtn} onClick={onCancel}><Icon name="back"/></button>
+        <div style={S.headerTitle}>Temporary Event</div>
       </div>
       <div style={S.formBody}>
-        <p style={S.tempNote}>Temporary events disappear after their end time.</p>
+        <div style={{background:'#1E293B',borderRadius:10,padding:'10px 14px',fontSize:13,color:'#F59E0B',marginBottom:8}}>⚡ Auto-expires after end time</div>
         <label style={S.label}>Title</label>
-        <input style={S.input} value={form.title} onChange={e => set('title', e.target.value)} placeholder="Event name" />
-
+        <input style={S.input} value={form.title} onChange={e=>set('title',e.target.value)} placeholder="What's happening?"/>
         <label style={S.label}>Day</label>
-        <div style={S.dayPicker}>
-          {DAYS.map(d => (
-            <button key={d}
-              style={{ ...S.dayPillBtn, ...(form.day === d ? S.dayPillActive : {}) }}
-              onClick={() => set('day', d)}>
-              {d.slice(0, 3)}
-            </button>
-          ))}
+        <select style={S.input} value={form.day} onChange={e=>set('day',e.target.value)}>{DAYS.map(d=><option key={d}>{d}</option>)}</select>
+        <div style={{display:'flex',gap:12}}>
+          <div style={{flex:1}}><label style={S.label}>Start</label><input style={S.input} type="time" value={form.start} onChange={e=>set('start',e.target.value)}/></div>
+          <div style={{flex:1}}><label style={S.label}>End</label><input style={S.input} type="time" value={form.end} onChange={e=>set('end',e.target.value)}/></div>
         </div>
-
-        <div style={S.row}>
-          <div style={{ flex: 1 }}>
-            <label style={S.label}>Start</label>
-            <input style={S.input} type="time" value={form.start} onChange={e => set('start', e.target.value)} />
-          </div>
-          <div style={{ width: 16 }} />
-          <div style={{ flex: 1 }}>
-            <label style={S.label}>End</label>
-            <input style={S.input} type="time" value={form.end} onChange={e => set('end', e.target.value)} />
-          </div>
-        </div>
-
-        <div style={S.row}>
-          <span style={S.label}>Notifications</span>
-          <Toggle value={form.notify} onChange={v => set('notify', v)} />
-        </div>
-        {form.notify && (
-          <div style={S.row}>
-            <span style={S.label}>Remind me</span>
-            <select style={S.select} value={form.notifyBefore} onChange={e => set('notifyBefore', Number(e.target.value))}>
-              {[0,5,10,15,30,60].map(n => <option key={n} value={n}>{n === 0 ? 'At event time' : `${n} min before`}</option>)}
-            </select>
-          </div>
-        )}
+        <div style={{height:16}}/>
+        <button style={{...S.saveBtn,background:'#F59E0B'}} onClick={()=>onSave(form)}>Add Temporary Event</button>
       </div>
     </div>
   );
 }
 
-function computeEndDate(day, endTime) {
-  const now = new Date();
-  const dayIdx = DAYS.indexOf(day);
-  const todayIdx = now.getDay() === 0 ? 6 : now.getDay() - 1;
-  let diff = dayIdx - todayIdx;
-  if (diff < 0) diff += 7;
-  const d = new Date(now);
-  d.setDate(d.getDate() + diff);
-  const [h, m] = endTime.split(':').map(Number);
-  d.setHours(h, m, 0, 0);
-  if (d <= now) d.setDate(d.getDate() + 7);
-  return d;
-}
-
-function computeNotifyAt(day, startTime, minutesBefore) {
-  const end = computeEndDate(day, startTime);
-  end.setMinutes(end.getMinutes() - minutesBefore);
-  return end;
-}
-
-// ─── Settings ─────────────────────────────────────────────────────────────────
-
-function Settings({
-  events, globalSoundOn, onSoundToggle, onEventUpdate, onReset,
-  allTemplates, customTemplates,
-  onSaveTemplate, onDeleteCustomTemplate, onLoadTemplate,
-  onClose,
-}) {
-  const [tab, setTab]           = useState('notifications');
-  const [resetConfirm, setResetConfirm] = useState(false);
-  const [saveModal, setSaveModal] = useState(false);
-  const [loadConfirm, setLoadConfirm] = useState(null); // template to load
-  const [deleteConfirm, setDeleteConfirm] = useState(null); // template id to delete
-  const [saveName, setSaveName]   = useState('');
-  const [saveDesc, setSaveDesc]   = useState('');
-  const [saveIcon, setSaveIcon]   = useState('📋');
-  const [saveColor, setSaveColor] = useState('#818CF8');
-  const [saveMsg, setSaveMsg]     = useState('');
-  const [saveId,  setSaveId]      = useState(''); // empty = new template
-
-  const TABS = ['notifications','sounds','templates','general'];
-
-  const openSaveModal = (existing = null) => {
-    if (existing) {
-      setSaveId(existing.id);
-      setSaveName(existing.name);
-      setSaveDesc(existing.description || '');
-      setSaveIcon(existing.icon || '📋');
-      setSaveColor(existing.color || '#818CF8');
-    } else {
-      setSaveId('');
-      setSaveName('My Schedule');
-      setSaveDesc('Custom template');
-      setSaveIcon('📋');
-      setSaveColor('#818CF8');
-    }
-    setSaveModal(true);
-  };
-
-  const handleSave = async () => {
-    if (!saveName.trim()) return;
-    const saved = await onSaveTemplate({ id: saveId || undefined, name: saveName, description: saveDesc, icon: saveIcon, color: saveColor });
-    setSaveMsg(`"${saved.name}" saved!`);
-    setSaveModal(false);
-    setTimeout(() => setSaveMsg(''), 3000);
-  };
-
-  const ICON_OPTIONS = ['📋','🗓️','⭐','🔥','💡','🏋️','📚','💼','🎯','🌟','🎓','🏠'];
-
+// ── Onboarding ────────────────────────────────────────────────────────────────
+function Onboarding({ onSelect }) {
   return (
-    <div style={S.page}>
-      <div style={S.formHeader}>
-        <button style={S.backBtn} onClick={onClose}><Icon name="back" /></button>
-        <span style={S.formTitle}>Settings</span>
-        <div style={{ width: 40 }} />
+    <div style={S.screen}>
+      <div style={{padding:'48px 24px 16px',textAlign:'center'}}>
+        <div style={{fontSize:26,fontWeight:800,color:'#F1F5F9'}}>Welcome to Timetable</div>
+        <div style={{fontSize:15,color:'#94A3B8',marginTop:6}}>Choose a starting template</div>
       </div>
-
-      {/* Tab bar */}
-      <div style={S.tabBar}>
-        {TABS.map(t => (
-          <button key={t} style={{ ...S.tabBtn, ...(tab === t ? S.tabBtnActive : {}) }}
-            onClick={() => setTab(t)}>
-            {t.charAt(0).toUpperCase() + t.slice(1)}
+      <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:12,padding:'0 16px 32px',overflowY:'auto'}}>
+        {TEMPLATES.map(t => (
+          <button key={t.id} onClick={()=>onSelect(t)} style={{background:'#1E293B',border:`2px solid ${t.color}`,borderRadius:16,padding:16,cursor:'pointer',textAlign:'left'}}>
+            <div style={{fontSize:28,marginBottom:8}}>{t.icon}</div>
+            <div style={{fontSize:14,fontWeight:700,color:'#F1F5F9'}}>{t.name}</div>
+            <div style={{fontSize:12,color:'#64748B',marginTop:4}}>{t.description}</div>
           </button>
         ))}
       </div>
+    </div>
+  );
+}
 
-      <div style={S.formBody}>
+// ── ChecklistView ─────────────────────────────────────────────────────────────
+function ChecklistView({ event, accomplishments, onToggleTask, onViewHistory, onBack }) {
+  const date = todayStr();
+  const todayChecks = ((accomplishments[event.id]||{})[date])||{};
+  const checklist = event.checklist||[];
+  const doneCount = checklist.filter(t=>todayChecks[t.id]).length;
+  const progress = checklist.length > 0 ? doneCount/checklist.length : 0;
 
-        {/* ── Notifications tab ── */}
-        {tab === 'notifications' && (
-          <>
-            <p style={S.settingNote}>Manage per-event notification settings.</p>
-            {events.filter(e => !e.isTemp).sort((a,b) => DAYS.indexOf(a.day) - DAYS.indexOf(b.day) || timeToMin(a.start) - timeToMin(b.start)).map(ev => (
-              <div key={ev.id} style={S.settingRow}>
-                <div style={{ display:'flex', alignItems:'center', gap: 10, flex: 1, minWidth: 0 }}>
-                  <span style={{ ...S.eventDot, background: ev.color, flexShrink: 0 }} />
-                  <div style={{ minWidth: 0 }}>
-                    <div style={{ fontWeight: 600, fontSize: 14, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{ev.title}</div>
-                    <div style={{ fontSize: 12, color: '#94A3B8' }}>{ev.day} · {fmtTime(ev.start)}</div>
-                  </div>
-                </div>
-                <Toggle value={ev.notify} onChange={v => onEventUpdate({ ...ev, notify: v })} />
-              </div>
-            ))}
-          </>
+  return (
+    <div style={S.screen}>
+      <div style={S.header}>
+        <button style={S.iconBtn} onClick={onBack}><Icon name="back"/></button>
+        <div style={S.headerTitle}>{event.title}</div>
+        <button style={{...S.iconBtn,color:'#818CF8'}} onClick={onViewHistory}><Icon name="history"/></button>
+      </div>
+      <div style={{flex:1,overflowY:'auto',padding:'8px 16px 32px'}}>
+        <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:10}}>
+          <div style={{fontSize:13,color:'#94A3B8',fontWeight:600}}>{formatDateDisplay(date)}</div>
+          <div style={{fontSize:20,fontWeight:800,color:'#F1F5F9'}}>{doneCount}/{checklist.length}</div>
+        </div>
+        <div style={{height:6,background:'#1E293B',borderRadius:3,marginBottom:20,overflow:'hidden'}}>
+          <div style={{height:'100%',borderRadius:3,transition:'width 0.4s ease',width:`${progress*100}%`,background:event.color}}/>
+        </div>
+        {checklist.length === 0 && (
+          <div style={S.emptyState}>
+            <div style={{fontSize:40}}>📋</div>
+            <div style={{fontSize:16,fontWeight:600,color:'#475569'}}>No checklist items yet</div>
+            <div style={{fontSize:13,color:'#334155'}}>Edit this event to add routine tasks</div>
+          </div>
         )}
-
-        {/* ── Sounds tab ── */}
-        {tab === 'sounds' && (
-          <>
-            <div style={S.settingRow}>
-              <div>
-                <div style={{ fontWeight: 600 }}>Master Sound</div>
-                <div style={{ fontSize: 12, color: '#94A3B8' }}>Enable sound for all notifications</div>
+        {checklist.map(task => {
+          const checked = !!todayChecks[task.id];
+          return (
+            <button key={task.id} onClick={()=>onToggleTask(event.id,task.id,!checked)}
+              style={{display:'flex',alignItems:'center',background:checked?'#162032':'#1E293B',borderRadius:12,padding:'14px 16px',marginBottom:8,gap:14,border:'none',width:'100%',cursor:'pointer',textAlign:'left',transition:'background 0.2s'}}>
+              <div style={{width:24,height:24,borderRadius:6,border:`2px solid ${checked?event.color:'#334155'}`,flexShrink:0,display:'flex',alignItems:'center',justifyContent:'center',background:checked?event.color:'transparent',color:'#fff',transition:'all 0.2s'}}>
+                {checked && <Icon name="check"/>}
               </div>
-              <Toggle value={globalSoundOn} onChange={onSoundToggle} />
-            </div>
-            <div style={S.divider} />
-            {events.filter(e => !e.isTemp).sort((a,b) => DAYS.indexOf(a.day) - DAYS.indexOf(b.day) || timeToMin(a.start) - timeToMin(b.start)).map(ev => (
-              <div key={ev.id} style={{ ...S.settingRow, flexDirection:'column', alignItems:'flex-start', gap: 8 }}>
-                <div style={{ display:'flex', alignItems:'center', gap: 10, width:'100%' }}>
-                  <span style={{ ...S.eventDot, background: ev.color }} />
-                  <span style={{ fontWeight: 600, fontSize: 14, flex: 1 }}>{ev.title}</span>
-                  <Toggle value={ev.soundEnabled} onChange={v => onEventUpdate({ ...ev, soundEnabled: v })} />
-                </div>
-                {ev.soundEnabled && (
-                  <select style={{ ...S.select, marginLeft: 28 }} value={ev.sound}
-                    onChange={e => onEventUpdate({ ...ev, sound: e.target.value })}>
-                    {SOUND_OPTIONS.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
-                  </select>
-                )}
-              </div>
-            ))}
-          </>
+              <div style={{fontSize:15,color:checked?'#475569':'#E2E8F0',textDecoration:checked?'line-through':'none',flex:1}}>{task.text}</div>
+            </button>
+          );
+        })}
+        {doneCount===checklist.length && checklist.length>0 && (
+          <div style={{textAlign:'center',padding:'20px',fontSize:15,color:'#34D399',fontWeight:700}}>🎉 All done for today!</div>
         )}
-
-        {/* ── Templates tab ── */}
-        {tab === 'templates' && (
-          <>
-            {saveMsg && <div style={S.successMsg}>{saveMsg}</div>}
-
-            {/* Save current as template */}
-            <div style={S.settingSection}>
-              <div style={S.settingSectionTitle}>Save Current Schedule</div>
-              <p style={S.settingNote}>Save your current events as a reusable template.</p>
-              <button style={S.primaryBtn} onClick={() => openSaveModal()}>
-                💾  Save as New Template
-              </button>
-            </div>
-
-            <div style={S.divider} />
-
-            {/* Custom templates */}
-            {customTemplates.length > 0 && (
-              <>
-                <div style={S.settingSectionTitle}>My Templates</div>
-                {customTemplates.map(t => (
-                  <div key={t.id} style={S.tmplRow}>
-                    <span style={S.tmplRowIcon}>{t.icon}</span>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 600, fontSize: 14 }}>{t.name}</div>
-                      <div style={{ fontSize: 12, color: '#94A3B8' }}>{t.description}</div>
-                      <div style={{ fontSize: 11, color: '#CBD5E1', marginTop: 2 }}>{t.events.length} events</div>
-                    </div>
-                    <div style={{ display:'flex', gap: 8 }}>
-                      <button style={S.tmplActionBtn} onClick={() => openSaveModal(t)}>✏️</button>
-                      <button style={S.tmplActionBtn} onClick={() => setLoadConfirm(t)}>📥</button>
-                      <button style={{ ...S.tmplActionBtn, color: '#EF4444' }} onClick={() => setDeleteConfirm(t.id)}>🗑️</button>
-                    </div>
-                  </div>
-                ))}
-                <div style={S.divider} />
-              </>
-            )}
-
-            {/* Default templates */}
-            <div style={S.settingSectionTitle}>Built-in Templates</div>
-            <p style={S.settingNote}>Load a built-in template to replace your current schedule.</p>
-            {DEFAULT_TEMPLATES.map(t => (
-              <div key={t.id} style={S.tmplRow}>
-                <span style={S.tmplRowIcon}>{t.icon}</span>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontWeight: 600, fontSize: 14 }}>{t.name}</div>
-                  <div style={{ fontSize: 12, color: '#94A3B8' }}>{t.description}</div>
-                  <div style={{ fontSize: 11, color: '#CBD5E1', marginTop: 2 }}>{t.events.length} events</div>
-                </div>
-                <button style={S.tmplActionBtn} onClick={() => setLoadConfirm(t)}>📥</button>
-              </div>
-            ))}
-
-            {/* Load confirm dialog */}
-            {loadConfirm && (
-              <div style={S.modalOverlay}>
-                <div style={S.modal}>
-                  <div style={S.modalTitle}>Load Template</div>
-                  <p style={S.modalText}>Load "{loadConfirm.name}"? This will replace your current schedule. Your saved templates won't be affected.</p>
-                  <div style={S.modalBtns}>
-                    <button style={S.modalConfirmBtn} onClick={async () => { await onLoadTemplate(loadConfirm); setLoadConfirm(null); }}>Load</button>
-                    <button style={S.modalCancelBtn} onClick={() => setLoadConfirm(null)}>Cancel</button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Delete confirm dialog */}
-            {deleteConfirm && (
-              <div style={S.modalOverlay}>
-                <div style={S.modal}>
-                  <div style={S.modalTitle}>Delete Template</div>
-                  <p style={S.modalText}>Are you sure you want to delete this template? This cannot be undone.</p>
-                  <div style={S.modalBtns}>
-                    <button style={{ ...S.modalConfirmBtn, background: '#EF4444' }}
-                      onClick={async () => { await onDeleteCustomTemplate(deleteConfirm); setDeleteConfirm(null); }}>Delete</button>
-                    <button style={S.modalCancelBtn} onClick={() => setDeleteConfirm(null)}>Cancel</button>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* Save modal */}
-            {saveModal && (
-              <div style={S.modalOverlay}>
-                <div style={{ ...S.modal, maxHeight: '80vh', overflowY:'auto' }}>
-                  <div style={S.modalTitle}>{saveId ? 'Update Template' : 'Save as Template'}</div>
-
-                  <label style={S.label}>Name</label>
-                  <input style={{ ...S.input, marginBottom: 12 }} value={saveName}
-                    onChange={e => setSaveName(e.target.value)} placeholder="Template name" />
-
-                  <label style={S.label}>Description</label>
-                  <input style={{ ...S.input, marginBottom: 12 }} value={saveDesc}
-                    onChange={e => setSaveDesc(e.target.value)} placeholder="Short description" />
-
-                  <label style={S.label}>Icon</label>
-                  <div style={{ display:'flex', flexWrap:'wrap', gap: 8, marginBottom: 12 }}>
-                    {ICON_OPTIONS.map(ic => (
-                      <button key={ic} style={{ ...S.iconPickerBtn, ...(saveIcon === ic ? S.iconPickerActive : {}) }}
-                        onClick={() => setSaveIcon(ic)}>
-                        {ic}
-                      </button>
-                    ))}
-                  </div>
-
-                  <label style={S.label}>Color</label>
-                  <div style={{ display:'flex', flexWrap:'wrap', gap: 8, marginBottom: 16 }}>
-                    {['#6366F1','#0EA5E9','#10B981','#F97316','#EC4899','#EF4444','#8B5CF6','#F59E0B','#94A3B8','#14B8A6'].map(c => (
-                      <button key={c} style={{ ...S.colorSwatch, background: c,
-                        outline: saveColor === c ? '3px solid #1E293B' : 'none' }}
-                        onClick={() => setSaveColor(c)} />
-                    ))}
-                  </div>
-
-                  <div style={S.modalBtns}>
-                    <button style={S.modalConfirmBtn} onClick={handleSave}>
-                      {saveId ? 'Update' : 'Save'}
-                    </button>
-                    <button style={S.modalCancelBtn} onClick={() => setSaveModal(false)}>Cancel</button>
-                  </div>
-                </div>
-              </div>
-            )}
-          </>
-        )}
-
-        {/* ── General tab ── */}
-        {tab === 'general' && (
-          <>
-            <div style={S.settingSectionTitle}>Data</div>
-            {resetConfirm ? (
-              <div style={S.deleteConfirm}>
-                <span>Reset all events and return to template picker?</span>
-                <div style={S.row}>
-                  <button style={S.deleteConfirmBtn} onClick={() => { setResetConfirm(false); onReset(); }}>Reset</button>
-                  <button style={S.cancelConfirmBtn} onClick={() => setResetConfirm(false)}>Cancel</button>
-                </div>
-              </div>
-            ) : (
-              <button style={S.deleteEventBtn} onClick={() => setResetConfirm(true)}>
-                Reset App &amp; Return to Template Picker
-              </button>
-            )}
-            <p style={S.settingNote}>This clears all events but keeps your saved custom templates.</p>
-          </>
-        )}
-
       </div>
     </div>
   );
 }
 
-// ─── Toggle ───────────────────────────────────────────────────────────────────
+// ── HistoryView ───────────────────────────────────────────────────────────────
+function HistoryView({ event, accomplishments, onBack }) {
+  const eventAcc = accomplishments[event.id]||{};
+  const checklist = event.checklist||[];
+  const dates = Object.keys(eventAcc).sort((a,b)=>b.localeCompare(a));
 
-function Toggle({ value, onChange }) {
   return (
-    <button
-      style={{ ...S.toggle, background: value ? '#6366F1' : '#CBD5E1' }}
-      onClick={() => onChange(!value)}
-    >
-      <span style={{ ...S.toggleThumb, transform: value ? 'translateX(20px)' : 'translateX(2px)' }} />
+    <div style={S.screen}>
+      <div style={S.header}>
+        <button style={S.iconBtn} onClick={onBack}><Icon name="back"/></button>
+        <div style={{flex:1}}>
+          <div style={S.headerTitle}>Progress History</div>
+          <div style={{fontSize:12,color:'#64748B'}}>{event.title}</div>
+        </div>
+      </div>
+      <div style={{flex:1,overflowY:'auto',padding:'8px 16px 32px'}}>
+        {dates.length === 0 && (
+          <div style={S.emptyState}>
+            <div style={{fontSize:40}}>📊</div>
+            <div style={{fontSize:16,fontWeight:600,color:'#475569'}}>No history yet</div>
+            <div style={{fontSize:13,color:'#334155'}}>Check off tasks to build your progress log</div>
+          </div>
+        )}
+        {dates.map(date => {
+          const checks = eventAcc[date]||{};
+          const done = checklist.filter(t=>checks[t.id]).length;
+          const total = checklist.length;
+          const pct = total>0 ? Math.round((done/total)*100) : 0;
+          const pctColor = pct===100?'#34D399':pct>50?'#FBBF24':'#94A3B8';
+          return (
+            <div key={date} style={{background:'#1E293B',borderRadius:14,padding:'14px 16px',marginBottom:12}}>
+              <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
+                <div style={{fontSize:14,fontWeight:700,color:'#F1F5F9'}}>{formatDateDisplay(date)}</div>
+                <div style={{fontSize:16,fontWeight:800,color:pctColor}}>{pct}%</div>
+              </div>
+              <div style={{height:4,background:'#0F172A',borderRadius:2,marginBottom:12,overflow:'hidden'}}>
+                <div style={{height:'100%',borderRadius:2,width:`${pct}%`,background:pct===100?'#34D399':event.color}}/>
+              </div>
+              <div style={{display:'flex',flexDirection:'column',gap:6}}>
+                {checklist.map(task=>(
+                  <div key={task.id} style={{display:'flex',alignItems:'flex-start',gap:8}}>
+                    <span style={{fontSize:13,fontWeight:700,color:checks[task.id]?'#34D399':'#475569',flexShrink:0}}>{checks[task.id]?'✓':'○'}</span>
+                    <span style={{fontSize:13,color:checks[task.id]?'#E2E8F0':'#64748B'}}>{task.text}</span>
+                  </div>
+                ))}
+                {checklist.length===0 && <div style={{fontSize:12,color:'#475569'}}>No active checklist items for this event</div>}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+// ── Settings ──────────────────────────────────────────────────────────────────
+function Settings({ events, globalSoundOn, setGlobalSoundOn, onReset, onBack }) {
+  const [tab, setTab] = useState('notifications');
+  const [showConfirm, setShowConfirm] = useState(false);
+  return (
+    <div style={S.screen}>
+      <div style={S.header}>
+        <button style={S.iconBtn} onClick={onBack}><Icon name="back"/></button>
+        <div style={S.headerTitle}>Settings</div>
+      </div>
+      <div style={{display:'flex',borderBottom:'1px solid #1E293B',flexShrink:0}}>
+        {['notifications','sounds','general'].map(t=>(
+          <button key={t} onClick={()=>setTab(t)} style={{flex:1,background:'none',border:'none',color:tab===t?'#818CF8':'#64748B',padding:'10px 4px',fontSize:13,fontWeight:600,cursor:'pointer',borderBottom:tab===t?'2px solid #818CF8':'2px solid transparent'}}>
+            {t[0].toUpperCase()+t.slice(1)}
+          </button>
+        ))}
+      </div>
+      <div style={S.formBody}>
+        {tab==='notifications' && (
+          <>
+            <div style={{fontSize:12,color:'#64748B',marginTop:12,marginBottom:8}}>Events with notifications enabled</div>
+            {events.filter(e=>e.notify).length===0 && <div style={{fontSize:13,color:'#475569'}}>No events have notifications enabled</div>}
+            {events.filter(e=>e.notify).map(e=>(
+              <div key={e.id} style={{display:'flex',alignItems:'center',padding:'10px 0',gap:10,borderBottom:'1px solid #1E293B'}}>
+                <div style={{...S.eventDot,background:e.color}}/>
+                <div style={{flex:1}}>
+                  <div style={{fontSize:14,color:'#E2E8F0'}}>{e.title}</div>
+                  <div style={{fontSize:12,color:'#94A3B8'}}>{e.day} · {fmtTime(e.start)} · {e.notifyBefore?`${e.notifyBefore}m before`:'At time'}</div>
+                </div>
+              </div>
+            ))}
+          </>
+        )}
+        {tab==='sounds' && (
+          <>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginTop:16,marginBottom:4}}>
+              <div><div style={S.label}>Master Sound</div><div style={{fontSize:12,color:'#64748B'}}>All notification sounds</div></div>
+              <Toggle on={globalSoundOn} onChange={setGlobalSoundOn}/>
+            </div>
+            <div style={{height:1,background:'#1E293B',margin:'16px 0'}}/>
+            {events.map(e=>(
+              <div key={e.id} style={{display:'flex',alignItems:'center',padding:'10px 0',gap:10,borderBottom:'1px solid #1E293B'}}>
+                <div style={{...S.eventDot,background:e.color}}/>
+                <div style={{flex:1}}><div style={{fontSize:14,color:'#E2E8F0'}}>{e.title}</div><div style={{fontSize:12,color:'#94A3B8'}}>{e.sound||'default'}</div></div>
+                <div style={{fontSize:12,color:e.soundEnabled?'#818CF8':'#475569'}}>{e.soundEnabled?'On':'Off'}</div>
+              </div>
+            ))}
+          </>
+        )}
+        {tab==='general' && (
+          <>
+            <div style={{fontSize:12,color:'#64748B',marginTop:16,marginBottom:8}}>Danger Zone</div>
+            <button onClick={()=>setShowConfirm(true)} style={{background:'#7F1D1D',border:'1px solid #EF4444',borderRadius:10,padding:'12px 20px',color:'#FCA5A5',fontSize:14,fontWeight:600,cursor:'pointer',width:'100%'}}>Reset All Data</button>
+            <div style={{fontSize:12,color:'#475569',marginTop:8}}>Clears all events, accomplishments, and returns to template selection</div>
+          </>
+        )}
+      </div>
+      {showConfirm && (
+        <div style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.7)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:100,padding:24}}>
+          <div style={{background:'#1E293B',borderRadius:16,padding:24,width:'100%',maxWidth:360}}>
+            <div style={{fontSize:18,fontWeight:700,color:'#F1F5F9',marginBottom:10}}>Reset All Data?</div>
+            <div style={{fontSize:14,color:'#94A3B8',marginBottom:20}}>This will delete all events and accomplishment history. This cannot be undone.</div>
+            <div style={{display:'flex',gap:10}}>
+              <button onClick={()=>setShowConfirm(false)} style={{flex:1,background:'#334155',border:'none',borderRadius:10,padding:12,color:'#E2E8F0',fontSize:14,fontWeight:600,cursor:'pointer'}}>Cancel</button>
+              <button onClick={onReset} style={{flex:1,background:'#EF4444',border:'none',borderRadius:10,padding:12,color:'#fff',fontSize:14,fontWeight:600,cursor:'pointer'}}>Reset</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Toggle ────────────────────────────────────────────────────────────────────
+function Toggle({ on, onChange }) {
+  return (
+    <button onClick={()=>onChange(!on)} style={{width:46,height:26,borderRadius:13,border:'none',cursor:'pointer',position:'relative',flexShrink:0,transition:'background 0.2s',background:on?'#818CF8':'#334155'}}>
+      <div style={{position:'absolute',top:3,width:20,height:20,borderRadius:'50%',background:'#fff',transition:'transform 0.2s',transform:on?'translateX(20px)':'translateX(2px)'}}/>
     </button>
   );
 }
 
-// ─── Icon ─────────────────────────────────────────────────────────────────────
-
+// ── Icon ──────────────────────────────────────────────────────────────────────
 function Icon({ name }) {
   const icons = {
-    settings: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} style={{ width:22,height:22 }}>
-      <circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/>
-    </svg>,
-    plus: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} style={{ width:24,height:24 }}>
-      <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-    </svg>,
-    lightning: <svg viewBox="0 0 24 24" fill="currentColor" style={{ width:22,height:22 }}>
-      <path d="M13 2L4.5 13.5H11L10 22L20.5 10H14L13 2Z"/>
-    </svg>,
-    back: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2.5} style={{ width:22,height:22 }}>
-      <polyline points="15 18 9 12 15 6"/>
-    </svg>,
-    trash: <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} style={{ width:18,height:18 }}>
-      <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14H6L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4h6v2"/>
-    </svg>,
+    settings: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>,
+    back: <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="15 18 9 12 15 6"/></svg>,
+    edit: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>,
+    plus: <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>,
+    bolt: <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><path d="M13 2L4.5 13.5H11L10 22L19.5 10.5H13Z"/></svg>,
+    trash: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>,
+    check: <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><polyline points="20 6 9 17 4 12"/></svg>,
+    checklist: <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/></svg>,
+    history: <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg>,
   };
-  return icons[name] || null;
+  return icons[name]||null;
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
-
+// ── Styles ────────────────────────────────────────────────────────────────────
 const S = {
-  page:        { display:'flex', flexDirection:'column', height:'100%', background:'#F8FAFC', overflow:'hidden' },
-  centered:    { display:'flex', alignItems:'center', justifyContent:'center', height:'100%' },
-  loader:      { width:40, height:40, borderRadius:'50%', border:'4px solid #E2E8F0', borderTopColor:'#6366F1', animation:'spin 0.8s linear infinite' },
-
-  // Header
-  header:      { display:'flex', alignItems:'center', justifyContent:'space-between', padding:'16px 16px 8px', background:'#fff', borderBottom:'1px solid #E2E8F0' },
-  headerTitle: { fontSize:20, fontWeight:700, color:'#1E293B' },
-  iconBtn:     { background:'none', border:'none', color:'#64748B', cursor:'pointer', padding:4, borderRadius:8, display:'flex', alignItems:'center' },
-
-  // Day strip
-  dayStrip:    { display:'flex', gap:4, padding:'10px 12px', background:'#fff', borderBottom:'1px solid #E2E8F0', overflowX:'auto' },
-  dayBtn:      { flex:'0 0 auto', padding:'6px 10px', borderRadius:10, border:'none', background:'#F1F5F9', cursor:'pointer', display:'flex', flexDirection:'column', alignItems:'center', gap:3 },
-  dayBtnActive:{ background:'#6366F1' },
-  dayBtnLabel: { fontSize:13, fontWeight:600, color:'inherit' },
-  todayDot:    { width:5, height:5, borderRadius:'50%', background:'#F59E0B' },
-
-  // Event list
-  eventList:   { flex:1, overflowY:'auto', padding:'12px 16px', display:'flex', flexDirection:'column', gap:8 },
-  emptyState:  { display:'flex', flexDirection:'column', alignItems:'center', justifyContent:'center', flex:1, padding:40 },
-  eventCard:   { background:'#fff', border:'none', borderLeft:'4px solid', borderRadius:12, padding:'12px 14px', cursor:'pointer', textAlign:'left', boxShadow:'0 1px 4px rgba(0,0,0,0.06)' },
-  eventCardInner: { display:'flex', alignItems:'center', justifyContent:'space-between' },
-  eventLeft:   { display:'flex', alignItems:'center', gap:10 },
-  eventRight:  { display:'flex', alignItems:'center', gap:8 },
-  eventDot:    { width:10, height:10, borderRadius:'50%', flexShrink:0 },
-  eventTitle:  { fontWeight:600, fontSize:15, color:'#1E293B' },
-  eventTime:   { fontSize:12, color:'#64748B', marginTop:2 },
-  liveBadge:   { fontSize:10, fontWeight:700, background:'#10B981', color:'#fff', padding:'2px 6px', borderRadius:6, letterSpacing:0.5 },
-  deleteBtn:   { background:'none', border:'none', color:'#EF4444', cursor:'pointer', padding:4, borderRadius:6, display:'flex' },
-
-  // FABs
-  fabGroup:    { position:'absolute', bottom:24, right:20, display:'flex', flexDirection:'column', alignItems:'flex-end', gap:12 },
-  fab:         { width:56, height:56, borderRadius:28, background:'#6366F1', border:'none', color:'#fff', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', boxShadow:'0 4px 14px rgba(99,102,241,0.4)' },
-  fabTemp:     { width:46, height:46, borderRadius:23, background:'#F59E0B', border:'none', color:'#fff', cursor:'pointer', display:'flex', alignItems:'center', justifyContent:'center', boxShadow:'0 4px 14px rgba(245,158,11,0.4)' },
-
-  // Onboarding
-  onboardHeader: { padding:'40px 24px 16px', textAlign:'center' },
-  onboardIcon:   { fontSize:48, marginBottom:8 },
-  onboardTitle:  { fontSize:28, fontWeight:800, color:'#1E293B', margin:0 },
-  onboardSub:    { fontSize:15, color:'#64748B', marginTop:6 },
-  tmplGrid:      { display:'grid', gridTemplateColumns:'1fr 1fr', gap:12, padding:'8px 16px 32px', overflowY:'auto' },
-  tmplCard:      { background:'#fff', border:'2px solid', borderRadius:16, padding:'16px 12px', cursor:'pointer', display:'flex', flexDirection:'column', alignItems:'center', gap:6, textAlign:'center', boxShadow:'0 2px 8px rgba(0,0,0,0.06)', position:'relative' },
-  tmplIcon:      { fontSize:32 },
-  tmplDot:       { width:8, height:8, borderRadius:'50%' },
-  tmplName:      { fontSize:13, fontWeight:700, color:'#1E293B' },
-  tmplDesc:      { fontSize:11, color:'#94A3B8' },
-  tmplCustomBadge: { position:'absolute', top:8, right:8, fontSize:9, fontWeight:700, background:'#6366F1', color:'#fff', padding:'2px 5px', borderRadius:4 },
-
-  // Form
-  formHeader:  { display:'flex', alignItems:'center', justifyContent:'space-between', padding:'16px 16px 12px', background:'#fff', borderBottom:'1px solid #E2E8F0' },
-  formTitle:   { fontSize:17, fontWeight:700, color:'#1E293B' },
-  backBtn:     { background:'none', border:'none', color:'#6366F1', cursor:'pointer', padding:4, display:'flex' },
-  saveBtn:     { background:'#6366F1', border:'none', color:'#fff', fontWeight:700, fontSize:15, padding:'8px 18px', borderRadius:10, cursor:'pointer' },
-  formBody:    { flex:1, overflowY:'auto', padding:'20px 16px', display:'flex', flexDirection:'column', gap:8 },
-
-  label:       { fontSize:13, fontWeight:600, color:'#475569', marginBottom:4 },
-  input:       { width:'100%', padding:'11px 13px', borderRadius:10, border:'1.5px solid #E2E8F0', fontSize:15, color:'#1E293B', background:'#fff', boxSizing:'border-box' },
-  select:      { padding:'8px 12px', borderRadius:8, border:'1.5px solid #E2E8F0', fontSize:14, color:'#1E293B', background:'#fff' },
-  row:         { display:'flex', alignItems:'center', justifyContent:'space-between', gap:12 },
-
-  // Day picker (multi)
-  dayPicker:   { display:'flex', gap:6, flexWrap:'wrap', marginBottom:4 },
-  dayPillBtn:  { padding:'6px 10px', borderRadius:8, border:'1.5px solid #E2E8F0', background:'#F8FAFC', fontSize:13, fontWeight:600, color:'#64748B', cursor:'pointer' },
-  dayPillActive: { background:'#6366F1', borderColor:'#6366F1', color:'#fff' },
-
-  // Quick day selectors
-  quickDays:   { display:'flex', flexWrap:'wrap', gap:6, marginBottom:4 },
-  quickDayBtn: { padding:'4px 10px', borderRadius:6, border:'1.5px solid #CBD5E1', background:'#F1F5F9', fontSize:12, fontWeight:600, color:'#64748B', cursor:'pointer' },
-
-  colorPicker: { display:'flex', flexWrap:'wrap', gap:8, marginBottom:4 },
-  colorSwatch: { width:28, height:28, borderRadius:'50%', border:'none', cursor:'pointer', outlineOffset:2 },
-
-  tempNote:    { fontSize:13, color:'#F59E0B', fontWeight:600, marginBottom:4 },
-
-  // Delete button inside form
-  deleteEventBtn: { marginTop:12, padding:'12px', borderRadius:10, border:'none', background:'#FEE2E2', color:'#EF4444', fontWeight:700, fontSize:15, cursor:'pointer' },
-  deleteConfirm:  { background:'#FFF1F2', borderRadius:12, padding:16, display:'flex', flexDirection:'column', gap:10 },
-  deleteConfirmBtn: { flex:1, padding:'10px', borderRadius:8, border:'none', background:'#EF4444', color:'#fff', fontWeight:700, cursor:'pointer' },
-  cancelConfirmBtn: { flex:1, padding:'10px', borderRadius:8, border:'none', background:'#E2E8F0', color:'#475569', fontWeight:700, cursor:'pointer' },
-
-  // Toggle
-  toggle:      { width:44, height:26, borderRadius:13, border:'none', cursor:'pointer', position:'relative', transition:'background 0.2s', flexShrink:0 },
-  toggleThumb: { position:'absolute', top:3, width:20, height:20, borderRadius:'50%', background:'#fff', transition:'transform 0.2s', boxShadow:'0 1px 4px rgba(0,0,0,0.2)' },
-
-  // Settings
-  tabBar:      { display:'flex', gap:0, background:'#fff', borderBottom:'1px solid #E2E8F0', overflowX:'auto' },
-  tabBtn:      { flex:'1 0 auto', padding:'12px 10px', border:'none', background:'none', fontSize:13, fontWeight:600, color:'#94A3B8', cursor:'pointer', borderBottom:'2px solid transparent', whiteSpace:'nowrap' },
-  tabBtnActive: { color:'#6366F1', borderBottomColor:'#6366F1' },
-  settingRow:  { display:'flex', alignItems:'center', justifyContent:'space-between', gap:12, padding:'10px 0', borderBottom:'1px solid #F1F5F9' },
-  settingNote: { fontSize:12, color:'#94A3B8', marginBottom:8 },
-  settingSection: { marginBottom:8 },
-  settingSectionTitle: { fontSize:14, fontWeight:700, color:'#475569', marginBottom:8, marginTop:4 },
-  divider:     { height:1, background:'#E2E8F0', margin:'12px 0' },
-  successMsg:  { background:'#D1FAE5', color:'#065F46', padding:'10px 14px', borderRadius:10, fontSize:13, fontWeight:600, marginBottom:8 },
-  primaryBtn:  { width:'100%', padding:'12px', borderRadius:10, border:'none', background:'#6366F1', color:'#fff', fontWeight:700, fontSize:15, cursor:'pointer', marginTop:4 },
-
-  // Template rows in settings
-  tmplRow:     { display:'flex', alignItems:'center', gap:10, padding:'10px 0', borderBottom:'1px solid #F1F5F9' },
-  tmplRowIcon: { fontSize:24, flexShrink:0 },
-  tmplActionBtn: { padding:'6px 8px', borderRadius:8, border:'1.5px solid #E2E8F0', background:'#F8FAFC', fontSize:15, cursor:'pointer' },
-
-  // Modal
-  modalOverlay: { position:'fixed', inset:0, background:'rgba(0,0,0,0.5)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:100, padding:20 },
-  modal:        { background:'#fff', borderRadius:16, padding:24, width:'100%', maxWidth:360, boxShadow:'0 8px 32px rgba(0,0,0,0.18)' },
-  modalTitle:   { fontSize:18, fontWeight:700, color:'#1E293B', marginBottom:12 },
-  modalText:    { fontSize:14, color:'#64748B', marginBottom:16, lineHeight:1.5 },
-  modalBtns:    { display:'flex', gap:10, marginTop:16 },
-  modalConfirmBtn: { flex:1, padding:'11px', borderRadius:10, border:'none', background:'#6366F1', color:'#fff', fontWeight:700, fontSize:15, cursor:'pointer' },
-  modalCancelBtn:  { flex:1, padding:'11px', borderRadius:10, border:'none', background:'#E2E8F0', color:'#475569', fontWeight:700, fontSize:15, cursor:'pointer' },
-
-  // Icon picker in modal
-  iconPickerBtn:    { fontSize:22, padding:6, border:'2px solid #E2E8F0', borderRadius:8, background:'#F8FAFC', cursor:'pointer' },
-  iconPickerActive: { borderColor:'#6366F1', background:'#EEF2FF' },
+  screen: {display:'flex',flexDirection:'column',height:'100%',background:'#0F172A',color:'#E2E8F0',overflow:'hidden'},
+  loadCenter: {display:'flex',alignItems:'center',justifyContent:'center',height:'100%'},
+  spinner: {width:32,height:32,border:'3px solid #1E293B',borderTop:'3px solid #818CF8',borderRadius:'50%',animation:'spin 0.8s linear infinite'},
+  header: {display:'flex',alignItems:'center',padding:'16px 16px 8px',gap:8,flexShrink:0},
+  headerTitle: {flex:1,fontSize:20,fontWeight:700,color:'#F1F5F9'},
+  iconBtn: {background:'none',border:'none',color:'#94A3B8',cursor:'pointer',padding:8,display:'flex',alignItems:'center',justifyContent:'center',borderRadius:8},
+  dayStrip: {display:'flex',padding:'4px 12px',gap:4,flexShrink:0,overflowX:'auto'},
+  dayBtn: {flex:1,minWidth:40,background:'transparent',border:'1px solid transparent',color:'#64748B',borderRadius:8,padding:'6px 4px',cursor:'pointer',fontSize:12,fontWeight:600},
+  dayBtnActive: {background:'#818CF8',color:'#fff',borderColor:'#818CF8'},
+  dayBtnToday: {borderColor:'#818CF8'},
+  eventList: {flex:1,overflowY:'auto',padding:'8px 16px 100px'},
+  eventCard: {display:'flex',alignItems:'center',background:'#1E293B',borderRadius:12,padding:'12px 12px',marginBottom:8,borderLeft:'4px solid transparent',gap:10},
+  eventDot: {width:10,height:10,borderRadius:'50%',flexShrink:0},
+  eventTitle: {fontSize:15,fontWeight:600,color:'#F1F5F9',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'},
+  eventTime: {fontSize:12,color:'#94A3B8',marginTop:2},
+  checklistMini: {fontSize:12,marginTop:4},
+  liveBadge: {background:'#EF4444',color:'#fff',fontSize:10,fontWeight:700,padding:'2px 6px',borderRadius:4,flexShrink:0},
+  tempBadge: {background:'#F59E0B',color:'#000',fontSize:10,fontWeight:700,padding:'1px 5px',borderRadius:4,marginLeft:6},
+  fab: {position:'absolute',bottom:24,right:24,width:56,height:56,borderRadius:28,background:'#818CF8',border:'none',color:'#fff',cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',boxShadow:'0 4px 20px rgba(129,140,248,0.4)'},
+  fabTemp: {right:92,background:'#F59E0B',boxShadow:'0 4px 20px rgba(245,158,11,0.4)'},
+  emptyState: {display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'60px 20px',gap:8},
+  formBody: {flex:1,overflowY:'auto',padding:'8px 16px'},
+  label: {display:'block',fontSize:12,fontWeight:600,color:'#94A3B8',textTransform:'uppercase',letterSpacing:'0.05em',marginBottom:6,marginTop:16},
+  input: {width:'100%',background:'#1E293B',border:'1px solid #334155',borderRadius:10,padding:'12px 14px',color:'#F1F5F9',fontSize:15,marginBottom:4,boxSizing:'border-box'},
+  saveBtn: {width:'100%',background:'#818CF8',border:'none',borderRadius:12,padding:'14px',color:'#fff',fontSize:16,fontWeight:700,cursor:'pointer'},
 };
